@@ -31,8 +31,8 @@ Les bibliothèques suivantes ont été utilisées et peuvent être installées v
 * **RColorBrewer** : Échelles de couleurs divergentes pour les cartes de risque.
 
 ## Autrices
-* **Kindi BALDÉ** (Matricule : XXXXXX)
-* **Elise GEERTS** (Matricule : 000617159)
+* **Kindi BALDÉ**
+* **Elise GEERTS**
 
 
 Université Libre de Bruxelles - Cours BING-F432 - "Introduction à l'épidémiologie spatiale et moléculaire"
