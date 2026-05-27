@@ -1,0 +1,749 @@
+# ============================================================
+# BING-F432 - Projet 1 : Cartographie de risque - Arbovirus en Europe
+# Modélisation de niche écologique par Boosted Regression Trees (BRT)
+# Binôme 08
+# ============================================================
+
+# ============================================================
+# ETAPE 1 : Packages et paramètres globaux
+# ============================================================
+
+if (!require(raster))       install.packages("raster")
+if (!require(sf))           install.packages("sf")
+if (!require(sp))           install.packages("sp")
+if (!require(RColorBrewer)) install.packages("RColorBrewer")
+if (!require(blockCV))      install.packages("blockCV")
+if (!require(dismo))        install.packages("dismo")
+if (!require(gbm))          install.packages("gbm")
+if (!require(ncf))          install.packages("ncf")
+
+library(raster); library(sf); library(sp); library(RColorBrewer)
+library(blockCV); library(dismo); library(gbm); library(ncf)
+
+setwd("C:/Users/Anne-Catherine/Documents/Privé/ULB/Q4/BING-F432 - Introduction à l'épidémiologie spatiale et moléculaire/Travaux")
+
+output_dir <- "Results outputs (où je vx les resultats graph ou tabl de R)"
+
+#Bloc permettant de sauvegarder extérieurement les figures d'intéret en PDF (vectorisé), SVG (vectorisé) et PNG (300 dpi)
+save_formats <- function(base_name, width, height, plot_fn) {
+  for (fmt in c("pdf", "svg", "png")) {
+    fpath <- file.path(output_dir, paste0(base_name, ".", fmt))
+    if      (fmt == "pdf") pdf(fpath, width = width, height = height)
+    else if (fmt == "svg") svg(fpath, width = width, height = height)
+    else                   png(fpath, width = width, height = height, units = "in", res = 300)
+    plot_fn()
+    dev.off()
+  }
+}
+
+
+# ============================================================
+# ETAPE 2 : Chargement des fichiers GIS
+# ============================================================
+
+# Noms des variables environnementales
+envVariableNames <- c(
+  "croplands_all_categories",
+  "human_pop_density_log10",
+  "managed_pasture_and_rangeland",
+  "precipitation_inFall",
+  "precipitation_spring",
+  "precipitation_summer",
+  "precipitation_winter",
+  "primary_forest_areas",
+  "primary_non_forest_areas",
+  "relative_humidity_inFall",
+  "relative_humidity_spring",
+  "relative_humidity_summer",
+  "relative_humidity_winter",
+  "secondary_forest_areas",
+  "secondary_non_forest_areas",
+  "temperature_inFall",
+  "temperature_spring",
+  "temperature_summer",
+  "temperature_winter"
+)
+
+# Titres des variables en toutes lettres
+envVariableTitles <- c(
+  "Terres cultivées",
+  "Densité de pop. (log10)",
+  "Pâturages",
+  "Précipitations (automne)",
+  "Précipitations (printemps)",
+  "Précipitations (été)",
+  "Précipitations (hiver)",
+  "Forêts primaires",
+  "Zones primaires non forestières",
+  "Humidité rel. (automne)",
+  "Humidité rel. (printemps)",
+  "Humidité rel. (été)",
+  "Humidité rel. (hiver)",
+  "Forêts secondaires",
+  "Zones secondaires non forestières",
+  "Température (automne)",
+  "Température (printemps)",
+  "Température (été)",
+  "Température (hiver)"
+)
+
+# Construction des chemins
+envFileStems <- gsub("non_forest", "non-forest", envVariableNames)
+mes_rasters  <- paste0("Fichiers GIS pr carto de risque/Environmental_raster_files/Raster_",
+                       envFileStems, ".asc")
+
+cat("\nRasters :\n");   print(basename(mes_rasters))
+cat("\nVariables environnementales (", length(envVariableNames), ") :\n")
+print(envVariableNames)
+
+envVariables <- list()
+for (i in 1:length(envVariableNames)) {
+  envVariables[[i]] <- raster(mes_rasters[i])
+  names(envVariables[[i]]) <- envVariableNames[i]
+}
+
+europe <- st_read("Fichiers GIS pr carto de risque/Coasts_study_area_shapefile/Coasts_study_area_shapefile.shp")
+if (is.na(st_crs(europe))) {
+  st_crs(europe) <- 4326
+} else if (!isTRUE(st_crs(europe) == st_crs(4326))) {
+  europe <- st_transform(europe, 4326)
+}
+europe_sp <- as(europe, "Spatial")
+
+
+# ============================================================
+# ETAPE 3 : Rasters (découpage et masquage)
+# ============================================================
+
+cat("Découpage des", length(mes_rasters), "rasters sur la zone d'étude...\n")
+
+envVariables <- lapply(1:length(envVariableNames), function(i) {
+  r       <- raster(mes_rasters[i])
+  r_crop  <- crop(r, extent(europe_sp))
+  r_mask  <- mask(r_crop, europe_sp)
+  names(r_mask) <- envVariableNames[i]
+  return(r_mask)
+})
+names(envVariables) <- envVariableNames
+
+save_formats("Verification_raster_masque", 7, 5, function() {
+  plot(envVariables[[1]], main = envVariableNames[1])
+  plot(st_geometry(europe), add = TRUE, border = "red", lwd = 1.5)
+})
+
+# Palettes de couleurs par variable
+env_cols <- list(
+  colorRampPalette(c("gray97", "navajowhite4"))(100),    # croplands
+  colorRampPalette(brewer.pal(9, "BuPu"))(100),          # human pop density
+  colorRampPalette(c("gray97", "burlywood3"))(100),       # managed pasture
+  colorRampPalette(brewer.pal(9, "YlGnBu"))(100),        # precip fall
+  colorRampPalette(brewer.pal(9, "YlGnBu"))(100),        # precip spring
+  colorRampPalette(brewer.pal(9, "YlGnBu"))(100),        # precip summer
+  colorRampPalette(brewer.pal(9, "YlGnBu"))(100),        # precip winter
+  colorRampPalette(c("gray97", "chartreuse4"))(100),      # primary forest
+  colorRampPalette(c("gray97", "olivedrab3"))(100),       # primary non-forest
+  colorRampPalette(brewer.pal(9, "Blues"))(100),          # humidity fall
+  colorRampPalette(brewer.pal(9, "Blues"))(100),          # humidity spring
+  colorRampPalette(brewer.pal(9, "Blues"))(100),          # humidity summer
+  colorRampPalette(brewer.pal(9, "Blues"))(100),          # humidity winter
+  colorRampPalette(c("gray97", "chartreuse4"))(100),      # secondary forest
+  colorRampPalette(c("gray97", "olivedrab3"))(100),       # secondary non-forest
+  colorRampPalette(brewer.pal(9, "YlOrRd"))(100),        # temp fall
+  colorRampPalette(brewer.pal(9, "YlOrRd"))(100),        # temp spring
+  colorRampPalette(brewer.pal(9, "YlOrRd"))(100),        # temp summer
+  colorRampPalette(brewer.pal(9, "YlOrRd"))(100)         # temp winter
+)
+
+# Labels combinés titre + unité
+env_labels_short <- c(
+  "Terres cultivées (prop.)",
+  "Densité pop. (log10 p/km²)",
+  "Pâturages (prop.)",
+  "Précip. automne (kg/m²/j)",
+  "Précip. printemps (kg/m²/j)",
+  "Précip. été (kg/m²/j)",
+  "Précip. hiver (kg/m²/j)",
+  "Forêts primaires (prop.)",
+  "Zones prim. non forest. (prop.)",
+  "Humid. rel. automne (%)",
+  "Humid. rel. printemps (%)",
+  "Humid. rel. été (%)",
+  "Humid. rel. hiver (%)",
+  "Forêts secondaires (prop.)",
+  "Zones sec. non forest. (prop.)",
+  "Temp. automne (°C)",
+  "Temp. printemps (°C)",
+  "Temp. été (°C)",
+  "Temp. hiver (°C)"
+)
+
+# Unités pour chaque variable
+env_units <- c(
+  "proportion",        # croplands
+  "log10(pers./km²)", # human pop density
+  "proportion",        # managed pasture
+  "kg/m²/jour",       # precip fall
+  "kg/m²/jour",       # precip spring
+  "kg/m²/jour",       # precip summer
+  "kg/m²/jour",       # precip winter
+  "proportion",        # primary forest
+  "proportion",        # primary non-forest
+  "%",                 # humidity fall
+  "%",                 # humidity spring
+  "%",                 # humidity summer
+  "%",                 # humidity winter
+  "proportion",        # secondary forest
+  "proportion",        # secondary non-forest
+  "°C",               # temp fall
+  "°C",               # temp spring
+  "°C",               # temp summer
+  "°C"                # temp winter
+)
+
+# Output de distribution géographique des 19 variables envi
+save_formats("Environmental_variables", 25, 18, function() {
+  par(mfrow = c(4, 5), oma = c(0, 0, 1.5, 0), mar = c(2, 0, 1.2, 0),
+      lwd = 0.2, col = "gray30", col.axis = "gray30", fg = "gray30")
+
+  fig_vals <- vector("list", length(envVariables))
+
+  # 1 : cartes sans légende — Sauvegarde par fugure de chaque panneau
+  for (i in seq_along(envVariables)) {
+    plot(envVariables[[i]], col = env_cols[[i]], ann = FALSE, legend = FALSE, axes = FALSE, box = FALSE)
+    plot(st_geometry(europe), add = TRUE, border = "gray50", lwd = 0.5)
+    mtext(env_labels_short[i], side = 3, line = 0.1, cex = 0.44, col = "gray30")
+    fig_vals[[i]] <- par("fig")   # coordonnées device du panneau i
+  }
+  plot.new()   # 20e cellule vide
+
+  # 2 : barres de couleur de ch. panneau
+  # Réutilisation des coordonnées sauvées (par(mfg) n'est pas nécessaire du coup)
+  csi_val <- par("csi")
+  mar_bot <- par("mar")[1]
+
+  for (i in seq_along(envVariables)) {
+    fig_i      <- fig_vals[[i]]
+    panel_h_in <- (fig_i[4] - fig_i[3]) * 18
+    plt3_frac  <- (mar_bot * csi_val) / panel_h_in
+
+    lx1 <- fig_i[1] + 0.06 * (fig_i[2] - fig_i[1])
+    lx2 <- fig_i[2] - 0.06 * (fig_i[2] - fig_i[1])
+    ly1 <- fig_i[3] + 0.001
+    ly2 <- fig_i[3] + plt3_frac * (fig_i[4] - fig_i[3]) - 0.001
+
+    if (ly2 > ly1) {
+      par(fig = c(lx1, lx2, ly1, ly2), new = TRUE, mar = c(0.3, 0, 0, 0))
+      plot(envVariables[[i]], col = env_cols[[i]], legend.only = TRUE, horizontal = TRUE,
+           add = FALSE, smallplot = c(0.02, 0.98, 0.35, 0.80),
+           axis.args = list(cex.axis = 0.38, lwd = 0, lwd.tick = 0.2, tck = -0.9,
+                            col.tick = "gray30", col = "gray30", col.axis = "gray30",
+                            line = 0, mgp = c(0, 0.08, 0)),
+           alpha = 1, side = 3)
+    }
+  }
+})
+
+
+# ============================================================
+# ETAPE 4 : Données de présence et zone de fond
+# ============================================================
+
+records_arbovirus <- read.csv("Binome_08 Jeux de données simulés/Arbovirus_risk_mapping_simulated_dataset_4-2.csv",
+                             head = TRUE)[, c("longitude", "latitude")]
+cat("Nombre de sites de présence :", nrow(records_arbovirus), "\n")
+
+template <- envVariables[[1]]
+template[!is.na(template[])] <- 1
+
+cells_pres <- unique(raster::extract(template, records_arbovirus, cellnumbers = TRUE))[, "cells"]
+cells_pres <- cells_pres[!is.na(cells_pres)]
+
+background <- template
+background[(1:length(background[])) %in% cells_pres] <- NA
+cells_adjacent <- adjacent(background, cells_pres, direction = 8)
+background[(1:length(background[])) %in% cells_adjacent] <- NA
+cells_background <- which(!is.na(background[]))
+
+cat("Cellules de présence :", length(cells_pres), "\n")
+cat("Cellules de fond disponibles :", length(cells_background), "\n")
+
+par(mar = c(2, 2, 2, 5))
+plot(background, col = "lightyellow", legend = FALSE, axes = FALSE, box = FALSE,
+     main = "Occurrences et zone de fond (pseudo-absences)")
+plot(st_geometry(europe), add = TRUE, border = "gray50", lwd = 0.8)
+points(records_arbovirus$longitude, records_arbovirus$latitude,
+       pch = 16, cex = 0.7, col = "red")
+legend("bottomright", legend = c("Présences", "Fond"), bty = "n",
+       pch = c(16, 15), col = c("red", "lightyellow"), cex = 0.8)
+
+
+# ============================================================
+# ETAPE 5 : Génération des data frames pour les réplicats algo BRT
+# ============================================================
+
+number_of_replicates <- 30
+dataframes <- list()
+
+for (i in 1:number_of_replicates) {
+  presences <- xyFromCell(template, cells_pres)
+  cells_pseudo_absence <- sample(cells_background, length(cells_pres), replace = FALSE) #ratio 1:1, comme selon le tuto du cours de Simon Dellicour (TPs 4-5)
+  pseudo_absences <- xyFromCell(template, cells_pseudo_absence)
+  data_i <- rbind(cbind(rep(1, dim(presences)[1]), presences),
+                  cbind(rep(0, dim(pseudo_absences)[1]), pseudo_absences))
+  colnames(data_i) <- c("response", "longitude", "latitude")
+  data_i <- cbind(data_i, raster::extract(stack(envVariables), data_i[,c(2:3)]))
+  dataframes[[i]] <- as.data.frame(data_i)
+  if (i == 1) print(str(dataframes[[i]]))
+}
+
+
+# ============================================================
+# ETAPE 6 : Autocorrélation spatiale et taille des blocs
+# ============================================================
+
+save_formats("Corrélogramme_spatial", 8, 5, function() {
+  par(oma = c(0,0,0,0), mar = c(4, 4, 2, 1))
+  for (i in 1:number_of_replicates) {
+    data_i      <- dataframes[[i]]
+    correlogram <- ncf::correlog(
+      data_i[, "longitude"], data_i[, "latitude"], data_i[, "response"],
+      na.rm = TRUE, increment = 100, resamp = 0, latlon = TRUE
+    )
+    if (i == 1) {
+      plot(correlogram$mean.of.class, correlogram$correlation,
+           ann = FALSE, axes = FALSE, lwd = 0.2, cex = 0.5, col = NA,
+           ylim = c(-1, 1.03), xlim = c(250,5700))
+      abline(h = 0, lwd = 0.8, col = rgb(222,67,39,255, maxColorValue=255), lty = 2)
+      axis(side=1, lwd.tick=0.2, cex.axis=0.7, lwd=0.2, tck=-0.03, col.axis="gray30", mgp=c(0,0.00,0), at=seq(500,5500,500))
+      axis(side=2, lwd.tick=0.2, cex.axis=0.7, lwd=0.2, tck=-0.03, col.axis="gray30", mgp=c(0,0.25,0), at=seq(-1,1,0.5))
+      title(main = "Corrélogramme spatial (autocorrélation des données de présence/absence)",
+            cex.main = 0.8, col.main = "gray30", line = 0.8)
+      title(xlab = "Distance entre sites (km)", line = 2.5, cex.lab = 0.9, col.lab = "gray30")
+      title(ylab = "Corrélation spatiale",       line = 2.5, cex.lab = 0.9, col.lab = "gray30")
+    }
+    lines(correlogram$mean.of.class[-1], correlogram$correlation[-1], lwd = 0.1, col = "gray60")
+  }
+})
+
+theRanges <- c(1250,1250) * 1000
+
+
+# ============================================================
+# ETAPE 7 : Entraînement des modèles BRT (réplicats)
+# ============================================================
+
+gbm.x              <- envVariableNames          # variables explicatives (colonnes du data frame)
+gbm.y              <- "response"                # var. réponse (présence=1 / pseudo-absence=0)
+offset             <- NULL
+tree.complexity    <- 5                         # profondeur max des arbres ("tc") — nb de nœuds
+learning.rate      <- 0.005                     # contribution de chaque arbre au modèle ("lr")
+bag.fraction       <- 0.80                      # proportion d'observations utilisées/arbre
+var.monotone       <- rep(0, length(gbm.x))     # 0 => pas de contrainte de monotonie sur les variables
+n.folds            <- 5                         # nombre de blocs spatiaux pour la cross-validation
+# pas d'intérêt à définir une variable comme "prev.stratify" car pas d'effet ds notre cas : blocs sont déjà définis par cv_spatial (via fold.vector)
+family             <- "bernoulli"               # distribution statistique (réponse binaire 0/1)
+step.size          <- 5                         # intervalle auquel la déviance prédictive est calculée
+max.trees          <- 10000                     # nb maximum d'arbres que l'algorithme peut construire
+tolerance.method   <- "auto"                    # méthode d'arrêt automatique de l'algorithme
+tolerance          <- 0.001                     # seuil : arrêt quand réduction de déviance < tolérance (Elith et al. (2008))
+plot.main          <- TRUE                      # affichage de la courbe de déviance résiduelle
+plot.folds         <- FALSE                     # ne pas afficher les blocs de cross-validation
+verbose            <- TRUE                      # affichage des messages pdt l'entraînement
+silent             <- FALSE                     # ne pas activer le mode silencieux
+keep.fold.models   <- FALSE                     # ne pas conserver les modèles par fold
+keep.fold.vector   <- FALSE                     # ne pas conserver les identifiants de fold
+keep.fold.fit      <- FALSE                     # ne pas conserver les prédictions par fold
+
+brt_models  <- list()
+predictions <- list()
+AUCs        <- matrix(nrow = number_of_replicates, ncol = 1, dimnames = list(NULL, "AUC"))
+
+for (i in 1:number_of_replicates) {
+  cat("\n=== Réplicat", i, "/", number_of_replicates, "===\n")
+  data_i <- dataframes[[i]]
+  
+  spdf <- SpatialPointsDataFrame(
+    data_i[c("longitude", "latitude")],
+    data_i[, c("response", envVariableNames)],
+    proj4string = crs(template)
+  )
+  
+  myblocks    <- cv_spatial(spdf, column = "response", k = n.folds,
+                            size = theRanges[1], selection = "random")
+  fold.vector <- myblocks$folds_ids
+  
+  n.trees      <- 10  # nb initial d'arbres (réinitialisé à chaque réplicat) ; cf'est gbm.step() qui détermine après
+                      # best.trees (nb optimal d'arbres minimisant la déviance, en cross-validation spatiale)
+  site.weights <- rep(1, dim(data_i)[1])
+  
+  brt_models[[i]] <- gbm.step(
+    data_i, gbm.x, gbm.y, offset, fold.vector, tree.complexity,
+    learning.rate, bag.fraction, site.weights, var.monotone, n.folds,
+    TRUE, family, n.trees, step.size, max.trees,
+    tolerance.method, tolerance, plot.main, plot.folds, verbose, silent,
+    keep.fold.models, keep.fold.vector, keep.fold.fit
+  )
+  
+  AUCs[i, "AUC"] <- brt_models[[i]]$cv.statistics$discrimination.mean
+
+  # Prédiction de l'adéquation écologique pour chaque pixel du raster EU
+  df_pred   <- as.data.frame(stack(envVariables))          # valeurs env. de chaque pixel en data frame
+  df_pred   <- df_pred[which(!is.na(rowMeans(df_pred))), ] # suppression des lignes avec NA
+  n_best    <- brt_models[[i]]$gbm.call$best.trees          # nb optimal d'arbres pour ce réplicat
+  pred_vals <- predict.gbm(brt_models[[i]], df_pred, n_best, "response", FALSE)
+
+  buf <- envVariables[[1]]        # raster vide (même emprise/résolution que les rasters env.)
+  buf[!is.na(buf[])] <- pred_vals # remplissage avec les valeurs prédites, pixel par pixel
+  predictions[[i]] <- buf
+}
+
+write.csv(AUCs,
+          file.path(output_dir, "AUC_value_replicates.csv"),
+          row.names = FALSE, quote = FALSE)
+saveRDS(brt_models,  file.path(output_dir, "BRT_model_replicates.rds"))
+saveRDS(predictions, file.path(output_dir, "BRT_model_predictions.rds"))
+
+
+# ============================================================
+# ETAPE 8 : Cartes de risque
+# ============================================================
+
+predictions <- readRDS(file.path(output_dir, "BRT_model_predictions.rds"))
+cols_risk   <- rev(colorRampPalette(brewer.pal(9, "RdYlBu"))(131)[11:121])
+
+save_formats("Risk_maps_replicats_1-7", 14, 4.5, function() {
+  par(mfrow = c(1, 7), oma = c(3, 0, 1.5, 0), mar = c(0.5, 0, 0.8, 0),
+      lwd = 0.2, col = "gray30", col.axis = "gray30", fg = "gray30")
+  for (i in 1:7) {
+    plot(predictions[[i]], col = cols_risk, ann = FALSE, legend = FALSE, axes = FALSE, box = FALSE)
+    plot(st_geometry(europe), add = TRUE, border = "gray50", lwd = 0.5)
+    mtext("Adéquation écologique", side = 3, line = 0.3, cex = 0.65, col = "gray30")
+    mtext(paste0("(réplicat ", i, ")"), side = 3, line = -0.7, cex = 0.65, col = "gray30")
+  }
+  # Légende
+  par(fig = c(0.25, 0.75, 0.01, 0.10), new = TRUE, mar = c(1.5, 0, 0, 0))
+  plot(predictions[[1]], col = cols_risk, legend.only = TRUE, horizontal = TRUE,
+       zlim = c(0, 1), smallplot = c(0.02, 0.98, 0.45, 0.80),
+       axis.args = list(cex.axis = 0.65, lwd = 0, lwd.tick = 0.2, tck = -0.5,
+                        at = c(0.05, 0.5, 0.95), labels = c("0", "0.5", "1"),
+                        col.tick = "gray30", col = "gray30", col.axis = "gray30",
+                        line = 0, mgp = c(0, 0.15, 0)))
+})
+
+pred_stack <- stack(predictions)
+mean_pred  <- calc(pred_stack, mean)
+sd_pred    <- calc(pred_stack, sd)
+cols_sd    <- colorRampPalette(brewer.pal(9, "YlOrRd"))(100)
+
+save_formats("Risk_map_mean_sd", 10, 6.5, function() {
+  par(mfrow = c(1, 2), oma = c(3, 0, 1.5, 0), mar = c(0.5, 0.5, 1.5, 0.5),
+      lwd = 0.2, col = "gray30", col.axis = "gray30", fg = "gray30")
+
+  plot(mean_pred, col = cols_risk, ann = FALSE, legend = FALSE, axes = FALSE, box = FALSE)
+  plot(st_geometry(europe), add = TRUE, border = "gray50", lwd = 0.5)
+  mtext("Adéquation écologique moyenne", side = 3, line = 0.3, cex = 0.9, col = "gray30")
+
+  plot(sd_pred, col = cols_sd, ann = FALSE, legend = FALSE, axes = FALSE, box = FALSE)
+  plot(st_geometry(europe), add = TRUE, border = "gray50", lwd = 0.5)
+  mtext("Écart-type entre réplicats", side = 3, line = 0.3, cex = 0.9, col = "gray30")
+
+  # Légendes
+  par(fig = c(0.03, 0.49, 0.01, 0.07), new = TRUE, mar = c(1.5, 0, 0, 0))
+  plot(mean_pred, col = cols_risk, legend.only = TRUE, horizontal = TRUE,
+       zlim = c(0, 1), smallplot = c(0.02, 0.98, 0.45, 0.80),
+       axis.args = list(cex.axis = 0.65, lwd = 0, lwd.tick = 0.2, tck = -0.5,
+                        at = c(0.05, 0.5, 0.95), labels = c("0", "0.5", "1"),
+                        col.tick = "gray30", col = "gray30", col.axis = "gray30",
+                        line = 0, mgp = c(0, 0.15, 0)))
+
+  par(fig = c(0.52, 0.97, 0.01, 0.07), new = TRUE, mar = c(1.5, 0, 0, 0))
+  plot(sd_pred, col = cols_sd, legend.only = TRUE, horizontal = TRUE,
+       smallplot = c(0.02, 0.98, 0.45, 0.80),
+       axis.args = list(cex.axis = 0.65, lwd = 0, lwd.tick = 0.2, tck = -0.9,
+                        col.tick = "gray30", col = "gray30", col.axis = "gray30",
+                        line = 0, mgp = c(0, 0.15, 0)))
+})
+
+
+# ============================================================
+# ETAPE 9 : Performance statistique (AUC + SIppc)
+# ============================================================
+
+AUCs <- read.csv(file.path(output_dir, "AUC_value_replicates.csv"), head = TRUE)
+cat("AUC moyen =", round(mean(AUCs[,1]), 2),
+    "| Intervalle AUC = [", round(min(AUCs[,1]), 2), ",", round(max(AUCs[,1]), 2), "]\n")
+
+brt_models <- readRDS(file.path(output_dir, "BRT_model_replicates.rds"))
+
+SI_ppcs    <- rep(NA, length(brt_models))
+thresholds <- rep(NA, length(brt_models))
+
+for (i in seq_along(brt_models)) {
+  tmp <- matrix(nrow = 101, ncol = 2, dimnames = list(NULL, c("threshold", "SIppc")))
+  tmp[, "threshold"] <- seq(0, 1, 0.01)
+  
+  df_i       <- brt_models[[i]]$gbm.call$dataframe
+  responses  <- df_i$response
+  data_env   <- df_i[, 4:ncol(df_i)]
+  n_best     <- brt_models[[i]]$gbm.call$best.trees
+  pred_i     <- predict.gbm(brt_models[[i]], data_env, n_best, "response", FALSE)
+  
+  P    <- sum(responses == 1) #nombre (150) de présences
+  A    <- sum(responses == 0) #nb de pseudo-absences (comme c'est un ratio 1:1, 150 aussi)
+  prev <- P / (P + A) #prévalence (proportion de présences ds le jeu de données)
+  x    <- (P / A) * ((1 - prev) / prev) #(facteur de correction du ratio présences/pseudo-absences, mais ici, avec le ratio 1:1, il est égal à 1)
+  SI_ppc_best <- 0
+  
+  for (threshold in seq(0, 1, 0.01)) {
+    TP         <- length(which((responses == 1) & (pred_i >= threshold)))
+    FN         <- length(which((responses == 1) & (pred_i <  threshold)))
+    FP_pa      <- length(which((responses == 0) & (pred_i >= threshold)))
+    SI_ppc_tmp <- (2 * TP) / ((2 * TP) + (x * FP_pa) + FN)
+    tmp[which(tmp[, "threshold"] == threshold), "SIppc"] <- SI_ppc_tmp
+    if (SI_ppc_best < SI_ppc_tmp) {
+      SI_ppc_best         <- SI_ppc_tmp
+      optimised_threshold <- threshold
+    }
+  }
+  SI_ppcs[i]    <- SI_ppc_best
+  thresholds[i] <- optimised_threshold
+}
+
+cat("SIppc moyen =", round(mean(SI_ppcs), 2),
+    "| Intervalle SIppc = [", round(min(SI_ppcs), 2), ",", round(max(SI_ppcs), 2), "]\n")
+cat("Seuil optimal moyen =", round(mean(thresholds), 2), "\n")
+
+perf_summary <- data.frame(AUC = AUCs[,1], SIppc = SI_ppcs, threshold = thresholds)
+write.csv(perf_summary,
+          file.path(output_dir, "Performance_summary.csv"),
+          row.names = FALSE, quote = FALSE)
+
+
+# ============================================================
+# ETAPE 10 : Importance relative des variables environnementales
+# ============================================================
+
+brt_models <- readRDS(file.path(output_dir, "BRT_model_replicates.rds"))
+
+relative_importances <- matrix(nrow = length(brt_models), ncol = length(envVariables))
+colnames(relative_importances) <- envVariableNames
+
+for (i in seq_along(brt_models)) {
+  summ <- summary(brt_models[[i]])  # résumé du modèle i — calcule l'importance relative (RI) de chaque variable
+  for (j in seq_along(envVariables)) {
+    relative_importances[i, j] <- summ[envVariableNames[j], "rel.inf"]  # RI de la variable j dans le réplicat i
+  }
+}
+
+write.table(relative_importances,
+            file.path(output_dir, "Relative_importances.csv"),
+            row.names = FALSE, quote = FALSE, sep = ",")
+
+RI_summary <- matrix(nrow = length(envVariables), ncol = 1,
+                     dimnames = list(envVariableNames, "mean RI [95% CI]"))
+for (i in seq_along(envVariables)) {
+  m  <- round(mean(relative_importances[, i]), 1)
+  ci <- round(t.test(relative_importances[, i])$conf.int[1:2], 1)
+  RI_summary[i, 1] <- paste0(m, " [", ci[1], ", ", ci[2], "]")
+}
+print(RI_summary)
+
+RI_means <- colMeans(relative_importances)
+RI_order <- order(RI_means, decreasing = TRUE)
+
+save_formats("Relative_importance_barplot", 10, 6.5, function() {
+  par(mar = c(12, 4.5, 2, 1))
+  barplot(RI_means[RI_order],
+          names.arg = envVariableTitles[RI_order],
+          las = 2, cex.names = 0.7, col = "steelblue",
+          ylab = "Importance relative moyenne (%)",
+          main = "Contribution des variables environnementales aux modèles BRT")
+})
+
+
+# ============================================================
+# ETAPE 11 : Courbes de réponse
+# ============================================================
+
+brt_models <- readRDS(file.path(output_dir, "BRT_model_replicates.rds"))
+
+sp_pres <- SpatialPoints(dataframes[[1]][which(dataframes[[1]][,"response"] == 1), 2:3])
+envVariableValues <- matrix(nrow = 3, ncol = length(envVariables),
+                            dimnames = list(c("median", "minV", "maxV"), envVariableNames))
+
+for (i in seq_along(envVariables)) {
+  pts  <- rasterize(sp_pres, envVariables[[i]])
+  rast <- envVariables[[i]]
+  rast[is.na(pts)] <- NA
+  envVariableValues[, i] <- c(median(rast[], na.rm = TRUE),
+                              min(rast[],    na.rm = TRUE),
+                              max(rast[],    na.rm = TRUE))
+}
+
+n_vars    <- length(envVariables)
+n_cols    <- min(5, n_vars)
+n_rows    <- ceiling(n_vars / n_cols)
+col_curve <- rgb(222, 67, 39, 255, maxColorValue = 255)
+
+save_formats("Response_curves", 5 * n_cols, 3.5 * n_rows, function() {
+  par(mfrow = c(n_rows, n_cols), oma = c(0,0,0,0), mar = c(3, 2.5, 1.5, 0.5))
+  for (i in seq_along(envVariables)) {
+    interval_i <- (envVariableValues["maxV", i] - envVariableValues["minV", i]) / 100
+    n_pts      <- length(seq(envVariableValues["minV", i], envVariableValues["maxV", i], interval_i))
+
+    df_rc <- data.frame(matrix(nrow = n_pts, ncol = length(envVariables)))
+    colnames(df_rc) <- envVariableNames
+
+    for (j in seq_along(envVariables)) {
+      interval_j <- (envVariableValues["maxV", j] - envVariableValues["minV", j]) / 100
+      if (i == j) {
+        df_rc[, j] <- seq(envVariableValues["minV", j], envVariableValues["maxV", j], interval_j)
+      } else {
+        df_rc[, j] <- rep(envVariableValues["median", j], n_pts)
+      }
+    }
+
+    preds_rc <- lapply(seq_along(brt_models), function(j) {
+      n_best_j <- brt_models[[j]]$gbm.call$best.trees
+      predict.gbm(brt_models[[j]], newdata = df_rc, n_best_j, "response", FALSE)
+    })
+
+    for (j in seq_along(brt_models)) {
+      if (j == 1) {
+        plot(df_rc[, envVariableNames[i]], preds_rc[[j]],
+             col = col_curve, ann = FALSE, axes = FALSE, lwd = 0.2,
+             type = "l",
+             xlim = c(min(df_rc[, envVariableNames[i]]), max(df_rc[, envVariableNames[i]])),
+             ylim = c(0, 1))
+      } else {
+        lines(df_rc[, envVariableNames[i]], preds_rc[[j]], col = col_curve, lwd = 0.2)
+      }
+    }
+    axis(1, lwd.tick=0.2, cex.axis=0.6, lwd=0, tck=-0.04, col.axis="gray30", mgp=c(0,0.2,0))
+    axis(2, lwd.tick=0.2, cex.axis=0.6, lwd=0, tck=-0.04, col.axis="gray30", mgp=c(0,0.4,0))
+    title(xlab = envVariableTitles[i], ylab = "Adéquation éco.",
+          cex.lab = 0.7, mgp = c(1.5, 0, 0), col.lab = "gray30")
+    box(lwd = 0.2, col = "gray30")
+  }
+})
+
+# ============================================================
+# ETAPE 12 : OUtputs ac zoom sur les 7 variables les plus contributives
+# ============================================================
+
+save_formats("ZOOM7_Relative_importance_barplot", 8, 6.5, function() {
+  top7_idx <- RI_order[1:7]
+  par(mar = c(14, 4.5, 2, 1))
+  barplot(RI_means[top7_idx],
+          names.arg = envVariableTitles[top7_idx],
+          las = 2, cex.names = 0.75, col = "steelblue",
+          ylab = "Importance relative moyenne (%)",
+          main = "7 variables les plus contributives aux modèles BRT")
+})
+
+save_formats("ZOOM7_Response_curves", 14, 5, function() {
+  top7_idx <- RI_order[1:7]
+  par(mfrow = c(1, 7), oma = c(0,0,0,0), mar = c(3, 2.5, 1.5, 0.5))
+  for (idx in top7_idx) {
+    i <- idx
+    interval_i <- (envVariableValues["maxV", i] - envVariableValues["minV", i]) / 100
+    n_pts      <- length(seq(envVariableValues["minV", i], envVariableValues["maxV", i], interval_i))
+
+    df_rc <- data.frame(matrix(nrow = n_pts, ncol = length(envVariables)))
+    colnames(df_rc) <- envVariableNames
+
+    for (j in seq_along(envVariables)) {
+      interval_j <- (envVariableValues["maxV", j] - envVariableValues["minV", j]) / 100
+      if (i == j) {
+        df_rc[, j] <- seq(envVariableValues["minV", j], envVariableValues["maxV", j], interval_j)
+      } else {
+        df_rc[, j] <- rep(envVariableValues["median", j], n_pts)
+      }
+    }
+
+    preds_rc <- lapply(seq_along(brt_models), function(j) {
+      n_best_j <- brt_models[[j]]$gbm.call$best.trees
+      predict.gbm(brt_models[[j]], newdata = df_rc, n_best_j, "response", FALSE)
+    })
+
+    for (j in seq_along(brt_models)) {
+      if (j == 1) {
+        plot(df_rc[, envVariableNames[i]], preds_rc[[j]],
+             col = col_curve, ann = FALSE, axes = FALSE, lwd = 0.2,
+             type = "l",
+             xlim = c(min(df_rc[, envVariableNames[i]]), max(df_rc[, envVariableNames[i]])),
+             ylim = c(0, 1))
+      } else {
+        lines(df_rc[, envVariableNames[i]], preds_rc[[j]], col = col_curve, lwd = 0.2)
+      }
+    }
+    axis(1, lwd.tick=0.2, cex.axis=0.6, lwd=0, tck=-0.04, col.axis="gray30", mgp=c(0,0.2,0))
+    axis(2, lwd.tick=0.2, cex.axis=0.6, lwd=0, tck=-0.04, col.axis="gray30", mgp=c(0,0.4,0))
+    title(xlab = envVariableTitles[i], ylab = "Adéquation éco.",
+          cex.lab = 0.7, mgp = c(1.5, 0, 0), col.lab = "gray30")
+    box(lwd = 0.2, col = "gray30")
+  }
+})
+
+cat("\n=== ANALYSE TERMINÉE ===\n")
+cat("Tous les résultats sont dans :", output_dir, "\n")
+
+
+# ============================================================
+# Récap des valeurs clés
+# ============================================================
+
+perf_summary        <- read.csv(file.path(output_dir, "Performance_summary.csv"), head = TRUE)
+relative_importances <- read.csv(file.path(output_dir, "Relative_importances.csv"), head = TRUE)
+brt_models          <- readRDS(file.path(output_dir, "BRT_model_replicates.rds"))
+
+cat("\n", strrep("=", 60), "\n")
+cat("  Récap des valeurs clés\n")
+cat(strrep("=", 60), "\n")
+
+# --- Performance prédictive ---
+cat("\n[ PERFORMANCE PRÉDICTIVE ]\n")
+
+auc_vals  <- perf_summary$AUC
+sippc_vals <- perf_summary$SIppc
+thr_vals  <- perf_summary$threshold
+
+fmt_stat <- function(vals, label) {
+  m  <- round(mean(vals), 3)
+  s  <- round(sd(vals),   3)
+  lo <- round(t.test(vals)$conf.int[1], 3)
+  hi <- round(t.test(vals)$conf.int[2], 3)
+  mn <- round(min(vals), 3)
+  mx <- round(max(vals), 3)
+  cat(sprintf("  %-22s  moy = %s  (IC95%% : [%s, %s])  sd = %s  min = %s  max = %s\n",
+              label, m, lo, hi, s, mn, mx))
+}
+
+fmt_stat(auc_vals,   "AUC")
+fmt_stat(sippc_vals, "SIppc")
+fmt_stat(thr_vals,   "Seuil optimal")
+
+# --- Nombre d'arbres ---
+best_trees_vec <- sapply(brt_models, function(m) m$gbm.call$best.trees)
+cat(sprintf("\n  %-22s  moy = %s  min = %s  max = %s\n",
+            "Nb arbres (best.trees)",
+            round(mean(best_trees_vec)),
+            min(best_trees_vec),
+            max(best_trees_vec)))
+
+# --- Importance relative ---
+cat("\n[ IMPORTANCE RELATIVE DES VARIABLES (par IRs décroissantes) ]\n\n")
+
+ri_means <- colMeans(relative_importances)
+ri_order <- order(ri_means, decreasing = TRUE)
+
+for (idx in ri_order) {
+  vals <- relative_importances[, idx]
+  m    <- round(mean(vals), 2)
+  lo   <- round(t.test(vals)$conf.int[1], 2)
+  hi   <- round(t.test(vals)$conf.int[2], 2)
+  cat(sprintf("  %2d. %-42s %5.2f %%  [IC95%% : %5.2f, %5.2f]\n",
+              which(ri_order == idx),
+              envVariableTitles[idx],
+              m, lo, hi))
+}
