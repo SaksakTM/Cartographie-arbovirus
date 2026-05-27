@@ -5,9 +5,9 @@
 Ce projet présente une analyse de distribution spatiale pour un arbovirus émergent récemment établi sur le continent européen, basée sur 150 enregistrements géocodés de présence simulés.
 
 ## Contenu du dépôt
-* **data/** : occurrences de l'arbovirus (WGS84), variables environnementales raster (ISIMIP) et masque d'étude européen.
-* **scripts/** : script R principal incluant la préparation des données, l'entraînement des modèles BRT et la validation croisée.
-* **results/** : cartographies d'adéquation écologique (moyenne et écart-type), analyse de l'importance relative (RI) et courbes de réponse.
+* **data_input/** : occurrences de l'arbovirus (WGS84), variables environnementales raster (ISIMIP) et masque d'étude européen.
+* **Script R/** : script R incluant la préparation des données, l'entraînement des modèles BRT et la validation croisée.
+* **outputs/** : cartographies d'adéquation écologique (moyenne et écart-type), analyse de l'importance relative (RI) et courbes de réponse.
 
 ## Méthodes utilisées
 * **Modélisation de niche (ENM)** : Algorithme de machine-learning "Boosted Regression Trees" (BRT) avec 30 réplicats pour gérer la stochasticité.
